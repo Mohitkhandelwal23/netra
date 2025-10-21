@@ -1,0 +1,656 @@
+openapi: 3.1.0
+info:
+  title: Netra Admin API
+  version: 0.1.0
+  description: |
+    Admin-only API for Netra city traffic optimization platform.
+    External ingestion from edge devices secured via mTLS.
+servers:
+  - url: https://api.netra.example.com
+    description: Production
+  - url: https://staging.api.netra.example.com
+    description: Staging
+security:
+  - bearerAuth: []
+tags:
+  - name: Auth
+  - name: Ingest
+  - name: Camera
+  - name: Analytics
+  - name: Signal
+  - name: E-Challan
+  - name: Models
+  - name: Simulation
+  - name: Admin
+paths:
+  /auth/login:
+    post:
+      tags: [Auth]
+      summary: Login with username/password
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [username, password]
+              properties:
+                username: { type: string }
+                password: { type: string, format: password }
+      responses:
+        '200':
+          description: Login successful
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  accessToken: { type: string }
+                  refreshToken: { type: string }
+                  requires2FA: { type: boolean, default: false }
+        '401': { description: Invalid credentials }
+  /auth/2fa:
+    post:
+      tags: [Auth]
+      summary: Complete 2FA challenge
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [otp, tempToken]
+              properties:
+                otp: { type: string }
+                tempToken: { type: string }
+      responses:
+        '200':
+          description: 2FA success
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  accessToken: { type: string }
+                  refreshToken: { type: string }
+        '401': { description: Invalid OTP }
+  /auth/refresh:
+    post:
+      tags: [Auth]
+      summary: Refresh access token
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [refreshToken]
+              properties:
+                refreshToken: { type: string }
+      responses:
+        '200':
+          description: Token refreshed
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  accessToken: { type: string }
+        '401': { description: Invalid refresh token }
+
+  /ingest/edge-event:
+    post:
+      tags: [Ingest]
+      summary: Ingest real-time metadata from edge boxes
+      description: Requires mTLS client cert; not available to browser clients.
+      security:
+        - mtls: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EdgeEvent'
+      responses:
+        '202': { description: Accepted }
+        '400': { description: Bad payload }
+
+  /camera/{id}/snapshot:
+    get:
+      tags: [Camera]
+      summary: Get latest snapshot image
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string, format: uuid }
+        - in: query
+          name: maxAgeSeconds
+          required: false
+          schema: { type: integer, minimum: 0, default: 10 }
+      responses:
+        '200':
+          description: JPEG image
+          content:
+            image/jpeg:
+              schema:
+                type: string
+                format: binary
+        '404': { description: Camera not found }
+
+  /camera/{id}/stream-metadata:
+    get:
+      tags: [Camera]
+      summary: Get stream metadata and health
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Stream metadata
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, enum: [online, offline, degraded] }
+                  codec: { type: string }
+                  resolution: { type: string }
+                  fps: { type: number }
+                  lastSeen: { type: string, format: date-time }
+                  url: { type: string, description: 'If accessible via gateway (auth required)' }
+        '404': { description: Not found }
+
+  /analytics/junction/{id}/stats:
+    get:
+      tags: [Analytics]
+      summary: Time-windowed stats for a junction
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string, format: uuid }
+        - in: query
+          name: from
+          schema: { type: string, format: date-time }
+        - in: query
+          name: to
+          schema: { type: string, format: date-time }
+      responses:
+        '200':
+          description: Analytics stats
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AnalyticsStats'
+
+  /analytics/heatmap:
+    get:
+      tags: [Analytics]
+      summary: Heatmap values for a bbox/time
+      parameters:
+        - in: query
+          name: bbox
+          description: 'minLon,minLat,maxLon,maxLat'
+          required: true
+          schema: { type: string }
+        - in: query
+          name: time
+          required: false
+          schema: { type: string, format: date-time }
+      responses:
+        '200':
+          description: Heatmap points
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/HeatmapPoint'
+
+  /signal/{junction}/mode:
+    post:
+      tags: [Signal]
+      summary: Set control mode for a junction
+      parameters:
+        - in: path
+          name: junction
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [mode]
+              properties:
+                mode:
+                  type: string
+                  enum: [ai, manual, scheduled]
+      responses:
+        '200': { description: Mode set }
+
+  /signal/{junction}/set-phase:
+    post:
+      tags: [Signal]
+      summary: Manually set phase and duration
+      parameters:
+        - in: path
+          name: junction
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [phase, durationSeconds]
+              properties:
+                phase: { type: string }
+                durationSeconds: { type: integer, minimum: 5 }
+      responses:
+        '200': { description: Phase applied }
+        '409': { description: Conflict with safety constraints or locks }
+
+  /signal/{junction}/state:
+    get:
+      tags: [Signal]
+      summary: Get current signal state
+      parameters:
+        - in: path
+          name: junction
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Current state
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SignalState'
+
+  /signal/coordination/link:
+    post:
+      tags: [Signal]
+      summary: Link multiple junctions into a coordination corridor
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [junctions]
+              properties:
+                junctions:
+                  type: array
+                  items: { type: string, format: uuid }
+      responses:
+        '200': { description: Corridor linked }
+
+  /challans/pending:
+    get:
+      tags: [E-Challan]
+      summary: List pending violations for review
+      parameters:
+        - in: query
+          name: limit
+          schema: { type: integer, default: 50, minimum: 1, maximum: 500 }
+        - in: query
+          name: cursor
+          schema: { type: string }
+      responses:
+        '200':
+          description: Pending violations
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: '#/components/schemas/Violation' }
+                  nextCursor: { type: string, nullable: true }
+
+  /challans/create:
+    post:
+      tags: [E-Challan]
+      summary: Create a challan from a reviewed violation
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [violationId, vehicleNumber, fine]
+              properties:
+                violationId: { type: string, format: uuid }
+                vehicleNumber: { type: string }
+                fine: { type: number, minimum: 0 }
+                notes: { type: string }
+      responses:
+        '201':
+          description: Challan created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Challan'
+        '404': { description: Violation not found }
+
+  /challans/{id}/pay:
+    post:
+      tags: [E-Challan]
+      summary: Mark challan as paid (callback or manual)
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [paymentRef]
+              properties:
+                paymentRef: { type: string }
+      responses:
+        '200':
+          description: Updated challan
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Challan'
+
+  /challans/{id}/appeal:
+    post:
+      tags: [E-Challan]
+      summary: Record an appeal for a challan
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [reason]
+              properties:
+                reason: { type: string }
+      responses:
+        '202': { description: Appeal recorded }
+
+  /models/{name}/metrics:
+    get:
+      tags: [Models]
+      summary: Get metrics for a model
+      parameters:
+        - in: path
+          name: name
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Model metrics
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ModelMetrics'
+
+  /models/{name}/retrain:
+    post:
+      tags: [Models]
+      summary: Trigger retraining job
+      parameters:
+        - in: path
+          name: name
+          required: true
+          schema: { type: string }
+      responses:
+        '202':
+          description: Retraining triggered
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  jobId: { type: string }
+
+  /simulation/run:
+    post:
+      tags: [Simulation]
+      summary: Run a what-if simulation
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SimulationRequest'
+      responses:
+        '200':
+          description: Simulation results
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SimulationResult'
+
+  /admin/cameras:
+    get:
+      tags: [Admin]
+      summary: List cameras
+      responses:
+        '200':
+          description: Cameras
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Camera' }
+
+  /admin/camera:
+    post:
+      tags: [Admin]
+      summary: Create or update a camera configuration
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CameraCreate'
+      responses:
+        '201': { description: Created }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+    mtls:
+      type: mutualTLS
+  schemas:
+    Camera:
+      type: object
+      required: [id, junctionId, name, lat, lon, fps]
+      properties:
+        id: { type: string, format: uuid }
+        junctionId: { type: string, format: uuid }
+        name: { type: string }
+        lat: { type: number }
+        lon: { type: number }
+        orientation: { type: string, nullable: true }
+        resolution: { type: string, example: '1920x1080' }
+        fps: { type: integer }
+        lastSeen: { type: string, format: date-time, nullable: true }
+        config: { type: object, additionalProperties: true }
+    CameraCreate:
+      type: object
+      required: [junctionId, name, lat, lon]
+      properties:
+        junctionId: { type: string, format: uuid }
+        name: { type: string }
+        lat: { type: number }
+        lon: { type: number }
+        orientation: { type: string, nullable: true }
+        resolution: { type: string }
+        fps: { type: integer }
+        config: { type: object, additionalProperties: true }
+    Junction:
+      type: object
+      required: [id, name]
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        region: { type: string }
+        linkedJunctionIds:
+          type: array
+          items: { type: string, format: uuid }
+        signalControllerId: { type: string }
+        defaultCycleTime: { type: integer }
+    Detection:
+      type: object
+      required: [id, cameraId, timestamp, vehicleType, bbox, confidence]
+      properties:
+        id: { type: string, format: uuid }
+        cameraId: { type: string, format: uuid }
+        timestamp: { type: string, format: date-time }
+        vehicleType: { type: string, enum: [car, bus, truck, two_wheeler, bicycle, pedestrian, auto_rickshaw] }
+        bbox:
+          type: object
+          required: [x, y, w, h]
+          properties:
+            x: { type: number }
+            y: { type: number }
+            w: { type: number }
+            h: { type: number }
+        speedEstimate: { type: number, nullable: true }
+        confidence: { type: number, minimum: 0, maximum: 1 }
+        trackId: { type: string, nullable: true }
+    Violation:
+      type: object
+      required: [id, cameraId, timestamp, type, confidence, status]
+      properties:
+        id: { type: string, format: uuid }
+        detectionId: { type: string, format: uuid, nullable: true }
+        cameraId: { type: string, format: uuid }
+        timestamp: { type: string, format: date-time }
+        type: { type: string, enum: [red_light, speeding, wrong_lane, pedestrian_encroachment] }
+        evidencePath: { type: string, description: S3 key }
+        confidence: { type: number, minimum: 0, maximum: 1 }
+        status: { type: string, enum: [pending, accepted, rejected, issued, void] }
+        issuedBy: { type: string, nullable: true }
+    Challan:
+      type: object
+      required: [id, violationId, fine, status]
+      properties:
+        id: { type: string, format: uuid }
+        violationId: { type: string, format: uuid }
+        vehicleNumber: { type: string }
+        fine: { type: number }
+        issuedAt: { type: string, format: date-time, nullable: true }
+        dueDate: { type: string, format: date-time, nullable: true }
+        paidAt: { type: string, format: date-time, nullable: true }
+        paymentRef: { type: string, nullable: true }
+        status: { type: string, enum: [draft, issued, paid, overdue, void] }
+    SignalState:
+      type: object
+      required: [id, junctionId, phase, startTime, duration, source]
+      properties:
+        id: { type: string, format: uuid }
+        junctionId: { type: string, format: uuid }
+        phase: { type: string }
+        startTime: { type: string, format: date-time }
+        duration: { type: integer }
+        source: { type: string, enum: [ai, manual, scheduled] }
+        operatorId: { type: string, nullable: true }
+    EdgeEvent:
+      type: object
+      required: [cameraId, timestamp]
+      properties:
+        cameraId: { type: string, format: uuid }
+        timestamp: { type: string, format: date-time }
+        counts:
+          type: object
+          additionalProperties: { type: integer }
+          example: { car: 5, bus: 1, truck: 2 }
+        detections:
+          type: array
+          items: { $ref: '#/components/schemas/Detection' }
+        violations:
+          type: array
+          items: { $ref: '#/components/schemas/Violation' }
+        crops:
+          type: array
+          items:
+            type: object
+            properties:
+              mimeType: { type: string, enum: [image/jpeg, image/png] }
+              dataBase64: { type: string, description: Base64-encoded image }
+              detectionId: { type: string, format: uuid, nullable: true }
+    AnalyticsStats:
+      type: object
+      properties:
+        window:
+          type: object
+          properties:
+            from: { type: string, format: date-time }
+            to: { type: string, format: date-time }
+        vehicleCount: { type: integer }
+        avgWaitSeconds: { type: number }
+        throughputVph: { type: number }
+        avgDelaySeconds: { type: number }
+        series:
+          type: array
+          items:
+            type: object
+            properties:
+              t: { type: string, format: date-time }
+              vehicleCount: { type: integer }
+              avgDelaySeconds: { type: number }
+    HeatmapPoint:
+      type: object
+      properties:
+        lat: { type: number }
+        lon: { type: number }
+        value: { type: number }
+    ModelMetrics:
+      type: object
+      properties:
+        name: { type: string }
+        version: { type: string }
+        latencyMsP50: { type: number }
+        latencyMsP95: { type: number }
+        fps: { type: number }
+        map: { type: number, description: 'mAP@0.5' }
+        recall: { type: number }
+        driftScore: { type: number }
+        updatedAt: { type: string, format: date-time }
+    SimulationRequest:
+      type: object
+      required: [junctions, duration]
+      properties:
+        junctions:
+          type: array
+          items: { type: string, format: uuid }
+        duration: { type: integer, minimum: 30, description: seconds }
+        scenario: { type: string, enum: [baseline, surge, incident, emergency] }
+    SimulationResult:
+      type: object
+      properties:
+        predictedQueueLengthAvg: { type: number }
+        predictedDelayAvg: { type: number }
+        recommendedPhases:
+          type: array
+          items:
+            type: object
+            properties:
+              junctionId: { type: string, format: uuid }
+              phase: { type: string }
+              durationSeconds: { type: integer }
